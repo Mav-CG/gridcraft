@@ -1,0 +1,17 @@
+[package]
+name = "gridcraft-rtd-com"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Fork Mav-CG: RTD client (COM IRtdServer) for =RTD() on Windows"
+
+# No `[lints] workspace = true`: this is the one crate allowed `unsafe` (COM FFI), kept behind a
+# safe API (docs/superpowers/specs/2026-10-12-rtd-design.md §3.2).
+
+[dependencies]
+log = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-core = "0.62"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_UI_WindowsAndMessaging"] }

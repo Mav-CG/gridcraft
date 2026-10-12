@@ -1613,6 +1613,15 @@ name = "gridcraft-pdf"
 version = "0.6.0"
 
 [[package]]
+name = "gridcraft-rtd-com"
+version = "0.6.0"
+dependencies = [
+ "log",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "gridcraft-ui-egui"
 version = "0.6.0"
 dependencies = [

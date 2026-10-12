@@ -29,6 +29,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("core", Class::Layer(0)),
     ("numfmt", Class::Layer(0)),
     ("pdf", Class::Layer(0)),
+    // Fork Mav-CG: COM client for =RTD() (docs/superpowers/specs/2026-10-12-rtd-design.md).
+    ("rtd-com", Class::Layer(0)),
     ("formula", Class::Layer(1)),
     ("functions", Class::Layer(1)),
     ("model", Class::Layer(2)),
