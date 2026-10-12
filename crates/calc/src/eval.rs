@@ -737,6 +737,9 @@ impl<'h> Evaluator<'h> {
                 Ev::V(Value::Bool(r))
             }
             "MAP" | "REDUCE" | "SCAN" | "BYROW" | "BYCOL" | "MAKEARRAY" => self.higher_order(name, args),
+            // Fork Mav-CG: =RTD() (crates/calc/src/rtd.rs). Not in the FnSpec registry nor in
+            // `is_special`, so `precedents` keeps it dynamic: every recalculation reads it again.
+            "RTD" => self.rtd(args),
             "NOW" | "TODAY" | "RAND" | "RANDBETWEEN" | "RANDARRAY" => {
                 self.host.note_volatile();
                 self.builtin(name, args)
