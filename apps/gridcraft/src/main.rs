@@ -16,6 +16,8 @@ mod graphics;
 mod logging;
 #[cfg(target_os = "macos")]
 mod native_menu;
+#[cfg(target_os = "windows")]
+mod rtd;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -39,6 +41,8 @@ impl eframe::App for App {
             apple_events::poll(&self.2, &mut self.0, ctx);
         }
         self.0.logic(ctx);
+        #[cfg(target_os = "windows")]
+        rtd::tick(&mut self.0, ctx);
     }
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         self.0.raw_input_hook(raw);
@@ -53,6 +57,8 @@ impl eframe::App for App {
         self.0.ui(ui);
     }
     fn on_exit(&mut self) {
+        #[cfg(target_os = "windows")]
+        rtd::stop();
         save_prefs(&self.0);
         // macOS (#117): end the process here, before eframe tears the window down. AccessKit's
         // macOS adapter subclasses the window's content view and restores its class on teardown;
@@ -298,6 +304,9 @@ fn main() -> eframe::Result<()> {
             None => logger.no_file(),
         }
     }
+    // Fork Mav-CG: the RTD source must exist before workbooks open (their first calculation asks for topics).
+    #[cfg(target_os = "windows")]
+    rtd::install();
     let mut session = Session::new();
     if let Some(s) = &sample
         && let Err(e) = session.execute("file.new", json!({"sample": s}))
@@ -367,6 +376,8 @@ fn main() -> eframe::Result<()> {
                         Err(e) => log::error!("control channel on port {port}: {e}"),
                     }
                 }
+                #[cfg(target_os = "windows")]
+                rtd::start(&cc.egui_ctx);
                 Ok(Box::new(App(
                     app,
                     #[cfg(target_os = "macos")]
