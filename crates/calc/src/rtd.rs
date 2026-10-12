@@ -29,8 +29,9 @@ pub trait RtdSource: Send + Sync {
     fn value(&self, key: &TopicKey) -> Option<Value>;
     /// A refresh pass starts.
     fn begin_pass(&self) {}
-    /// The refresh pass ended; `sweep` = every open workbook was recalculated in it, so a topic no
-    /// cell read is unused.
+    /// The refresh pass ended; `sweep` = every open workbook was recalculated in it, so a topic
+    /// nothing read since the previous sweep (in this pass, or in between: conditional formatting
+    /// evaluated while painting, an edit) is unused.
     fn end_pass(&self, _sweep: bool) {}
 }
 
@@ -99,7 +100,7 @@ struct Inner {
     /// Topics asked for and not dropped.
     live: HashSet<TopicKey>,
     values: HashMap<TopicKey, Value>,
-    /// Topics read since the last `begin_pass`.
+    /// Topics read since the last sweep.
     seen: HashSet<TopicKey>,
     requests: Vec<Request>,
 }
@@ -137,12 +138,6 @@ impl RtdSource for TopicTable {
         i.values.get(key).cloned()
     }
 
-    fn begin_pass(&self) {
-        if let Ok(mut i) = self.inner.lock() {
-            i.seen.clear();
-        }
-    }
-
     fn end_pass(&self, sweep: bool) {
         let Ok(mut i) = self.inner.lock() else { return };
         if !sweep {
@@ -154,6 +149,7 @@ impl RtdSource for TopicTable {
             i.values.remove(&k);
             i.requests.push(Request::Disconnect(k));
         }
+        i.seen.clear();
     }
 }
 
@@ -282,9 +278,28 @@ mod tests {
         begin_pass();
         b.refresh();
         end_pass(true);
+        assert!(t.take_requests().is_empty(), "VALE3 was read since the last sweep (before A2 was cleared)");
+        begin_pass();
+        b.refresh();
+        end_pass(true);
         let vale3 = key("rtdtrading.rtdserver", &["VALE3_B_0", "ULT"]);
         assert_eq!(t.take_requests(), vec![Request::Disconnect(vale3.clone())]);
         b.set("A2", r#"=RTD("rtdtrading.rtdserver",,"VALE3_B_0","ULT")"#);
         assert_eq!(t.take_requests(), vec![Request::Connect(vale3)], "typed again: connected again");
+    }
+
+    /// Conditional formatting and the like evaluate RTD while painting, between refresh passes
+    /// (which only recalculate cells): such a topic must not be dropped and connected again.
+    #[test]
+    fn a_topic_read_between_passes_is_kept() {
+        let _turn = turn();
+        let t = table();
+        let k = key("srv.rtd", &["SQT", "PETR4", "LAST"]);
+        for _ in 0..3 {
+            let _ = t.value(&k); // painted
+            begin_pass();
+            end_pass(true); // a refresh that recalculated every workbook without reading it
+        }
+        assert_eq!(t.take_requests(), vec![Request::Connect(k)], "connected once, never dropped");
     }
 }

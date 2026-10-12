@@ -138,6 +138,8 @@ mod tests {
         assert_eq!(v(&s, "A1"), Value::Number(56.0));
         s.set_active(0);
         assert_eq!(v(&s, "B1"), Value::Number(57.0));
+        assert!(t.take_requests().is_empty(), "VALE3 was read since the last sweep");
+        s.rtd_refresh();
         assert_eq!(t.take_requests(), vec![Request::Disconnect(topic("VALE3"))]);
     }
 
@@ -155,6 +157,7 @@ mod tests {
         t.set(topic("VALE3"), Value::Number(60.0));
         s.rtd_refresh();
         assert_eq!(v(&s, "A1"), Value::Number(60.0));
-        assert_eq!(t.take_requests(), vec![Request::Disconnect(topic("PETR4"))]);
+        s.rtd_refresh();
+        assert_eq!(t.take_requests(), vec![Request::Disconnect(topic("PETR4"))], "dropped on the sweep after it was last read");
     }
 }

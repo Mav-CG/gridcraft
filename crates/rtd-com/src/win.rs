@@ -1,10 +1,10 @@
 //! The COM side (spec §4.2): VARIANT and SAFEARRAY helpers, the RTD interfaces and the STA thread.
+// COM member names (`ServerStart`, `UpdateNotify`) come from the RTD interfaces.
 #![allow(non_snake_case)]
-// COM member names (`ServerStart`, `UpdateNotify`) from the RTD interfaces.
 // `Instant::now` is disallowed because it traps on wasm; this module only builds on Windows.
 #![allow(clippy::disallowed_methods)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,14 +12,18 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{DISP_E_MEMBERNOTFOUND, DISP_E_UNKNOWNNAME, E_FAIL, E_NOTIMPL, E_OUTOFMEMORY, VARIANT_BOOL, VARIANT_TRUE};
+use windows::Win32::Foundation::{
+    CloseHandle, DISP_E_MEMBERNOTFOUND, DISP_E_UNKNOWNNAME, E_FAIL, E_NOTIMPL, E_OUTOFMEMORY, ERROR_SUCCESS, VARIANT_BOOL, VARIANT_TRUE,
+};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, CLSIDFromProgID, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     DISPATCH_FLAGS, DISPATCH_PROPERTYGET, DISPPARAMS, EXCEPINFO, IDispatch, IDispatch_Impl, IDispatch_Vtbl, ITypeInfo, SAFEARRAY,
 };
+use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
 use windows::Win32::System::Ole::{
     SafeArrayCreateVector, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayPutElement,
 };
+use windows::Win32::System::Registry::{HKEY_CLASSES_ROOT, RRF_RT_REG_SZ, RegGetValueW};
 use windows::Win32::System::Variant::{
     VAR_CHANGE_FLAGS, VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_ERROR, VT_I4, VT_NULL, VT_R8, VT_VARIANT, VariantChangeType, VariantClear,
 };
@@ -32,6 +36,8 @@ use crate::{RtdValue, Topic};
 
 /// A server or topic that failed is tried again after this.
 const RETRY: Duration = Duration::from_secs(5);
+/// How often each server is asked `Heartbeat` (a server process that died sends nothing).
+const ALIVE_CHECK: Duration = Duration::from_secs(5);
 /// `stop` waits this long for the COM thread (a frozen server must not hold up closing the app).
 const STOP_WAIT: Duration = Duration::from_secs(2);
 /// How long the thread sleeps waiting for COM messages (`UpdateNotify`) or requests.
@@ -61,10 +67,12 @@ unsafe trait IRTDUpdateEvent: IDispatch {
 }
 
 /// What the servers call back: `UpdateNotify` only raises a flag (it may come from another thread);
-/// the COM thread then asks for the values with `RefreshData`.
+/// the COM thread then asks for the values with `RefreshData`. `Disconnect` (the server is going
+/// away) raises `gone`.
 #[implement(IRTDUpdateEvent)]
 struct Callback {
     pending: Arc<AtomicBool>,
+    gone: Arc<AtomicBool>,
 }
 
 impl IRTDUpdateEvent_Impl for Callback_Impl {
@@ -83,6 +91,7 @@ impl IRTDUpdateEvent_Impl for Callback_Impl {
         HRESULT(0)
     }
     unsafe fn Disconnect(&self) -> HRESULT {
+        self.gone.store(true, Ordering::Release);
         HRESULT(0)
     }
 }
@@ -123,7 +132,10 @@ impl IDispatch_Impl for Callback_Impl {
                 }
                 Ok(())
             }
-            12 => Ok(()),
+            12 => {
+                self.gone.store(true, Ordering::Release);
+                Ok(())
+            }
             _ => Err(DISP_E_MEMBERNOTFOUND.into()),
         }
     }
@@ -189,14 +201,17 @@ pub(crate) fn to_value(v: &Var) -> RtdValue {
 struct Server {
     rtd: IRtdServer,
     pending: Arc<AtomicBool>,
+    gone: Arc<AtomicBool>,
+    /// When to ask `Heartbeat` next.
+    beat_at: Instant,
     _callback: IRTDUpdateEvent,
 }
 
 /// CoCreateInstance (in-process DLL or local EXE, which COM starts if it isn't running) + ServerStart.
 fn start_server(prog_id: &str) -> windows_core::Result<Server> {
     let wide: Vec<u16> = prog_id.encode_utf16().chain(std::iter::once(0)).collect();
-    let pending = Arc::new(AtomicBool::new(false));
-    let callback: IRTDUpdateEvent = Callback { pending: pending.clone() }.into();
+    let (pending, gone) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let callback: IRTDUpdateEvent = Callback { pending: pending.clone(), gone: gone.clone() }.into();
     // SAFETY: `wide` is NUL-terminated and outlives the calls; `callback` stays alive in `Server`.
     unsafe {
         let clsid = CLSIDFromProgID(PCWSTR(wide.as_ptr()))?;
@@ -206,8 +221,65 @@ fn start_server(prog_id: &str) -> windows_core::Result<Server> {
         if started <= 0 {
             return Err(windows_core::Error::new(E_FAIL, format!("ServerStart returned {started}")));
         }
-        Ok(Server { rtd, pending, _callback: callback })
+        Ok(Server { rtd, pending, gone, beat_at: Instant::now() + ALIVE_CHECK, _callback: callback })
     }
+}
+
+/// The EXE of a server registered as `LocalServer32` (`None` for an in-process DLL server).
+fn local_server_exe(prog_id: &str) -> Option<String> {
+    let wide: Vec<u16> = prog_id.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: NUL-terminated strings that outlive the calls; the buffer size is passed in bytes.
+    unsafe {
+        let clsid = CLSIDFromProgID(PCWSTR(wide.as_ptr())).ok()?;
+        let key: Vec<u16> = format!("CLSID\\{{{clsid:?}}}\\LocalServer32").encode_utf16().chain(std::iter::once(0)).collect();
+        let mut buf = [0u16; 1024];
+        let mut bytes = (buf.len() * 2) as u32;
+        let r = RegGetValueW(
+            HKEY_CLASSES_ROOT,
+            PCWSTR(key.as_ptr()),
+            PCWSTR::null(),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut bytes),
+        );
+        if r != ERROR_SUCCESS {
+            return None;
+        }
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        exe_name(&String::from_utf16_lossy(buf.get(..len)?))
+    }
+}
+
+/// `C:\dir\app.exe`, `"C:\Program Files\app.exe" /automation` → `app.exe` (lower-case).
+fn exe_name(command: &str) -> Option<String> {
+    let lower = command.trim().trim_start_matches('"').to_ascii_lowercase();
+    let path = lower.get(..lower.find(".exe")? + 4)?;
+    path.rsplit(['\\', '/']).next().map(str::to_string)
+}
+
+fn process_running(exe: &str) -> bool {
+    // SAFETY: a process snapshot closed below; the entry carries its own size as the API asks.
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return false };
+        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut found = false;
+        let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+        while more && !found {
+            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            found = entry.szExeFile.get(..len).is_some_and(|name| String::from_utf16_lossy(name).eq_ignore_ascii_case(exe));
+            more = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+        found
+    }
+}
+
+/// Whether starting the server again is fine after it went away: an in-process server always; an
+/// EXE server only once its process runs again (COM would otherwise relaunch the program the user
+/// just closed).
+fn may_restart(prog_id: &str) -> bool {
+    local_server_exe(prog_id).is_none_or(|exe| process_running(&exe))
 }
 
 /// ConnectData: the topic strings go as a 1-D array of BSTR VARIANTs; returns the initial value.
@@ -312,8 +384,12 @@ fn pump(wait: Duration) {
 #[derive(Default)]
 struct State {
     servers: HashMap<String, Server>,
-    /// When a ProgID that failed (start, connect or refresh) may be tried again.
+    /// When a ProgID whose server failed to start or went away may be tried again.
     retry_at: HashMap<String, Instant>,
+    /// When a topic whose ConnectData failed (the server is fine) may be tried again.
+    topic_retry: HashMap<Topic, Instant>,
+    /// ProgIDs whose server went away: started again only when `may_restart` says so.
+    lost: HashSet<String>,
     /// Topics asked for: `Some(id)` once connected.
     topics: HashMap<Topic, Option<i32>>,
     ids: HashMap<i32, Topic>,
@@ -326,6 +402,7 @@ impl State {
     }
 
     fn unwant(&mut self, t: &Topic) {
+        self.topic_retry.remove(t);
         if let Some(Some(id)) = self.topics.remove(t) {
             self.ids.remove(&id);
             if let Some(s) = self.servers.get(&t.prog_id) {
@@ -343,14 +420,28 @@ impl State {
         self.servers.get(prog_id).ok_or_else(|| E_FAIL.into())
     }
 
-    /// ConnectData for the topics not connected yet; a failure (the Profit still loading, say)
-    /// holds that ProgID back for `RETRY`.
+    /// Topics not connected yet whose own wait and whose server's wait are over.
+    fn due(&self, now: Instant) -> Vec<Topic> {
+        self.topics
+            .iter()
+            .filter(|(t, id)| {
+                id.is_none() && self.retry_at.get(&t.prog_id).is_none_or(|at| now >= *at) && self.topic_retry.get(*t).is_none_or(|at| now >= *at)
+            })
+            .map(|(t, _)| t.clone())
+            .collect()
+    }
+
+    /// ConnectData for the topics that are due. A server that went away is only started again once
+    /// `may_restart`; one that fails to start holds its ProgID back for `RETRY`.
     fn connect_pending(&mut self) -> Vec<(Topic, RtdValue)> {
         let now = Instant::now();
-        let waiting: Vec<Topic> = self.topics.iter().filter(|(_, id)| id.is_none()).map(|(t, _)| t.clone()).collect();
         let mut out = Vec::new();
-        for t in waiting {
+        for t in self.due(now) {
             if self.retry_at.get(&t.prog_id).is_some_and(|at| now < *at) {
+                continue; // set while going through this batch
+            }
+            if !self.servers.contains_key(&t.prog_id) && self.lost.contains(&t.prog_id) && !may_restart(&t.prog_id) {
+                self.retry_at.insert(t.prog_id.clone(), now + RETRY);
                 continue;
             }
             let rtd = match self.server(&t.prog_id) {
@@ -361,48 +452,94 @@ impl State {
                     continue;
                 }
             };
+            self.lost.remove(&t.prog_id);
             self.next_id = self.next_id.checked_add(1).unwrap_or(1);
             let id = self.next_id;
             match connect_data(&rtd, id, &t.strings) {
                 Ok(v) => {
+                    self.topic_retry.remove(&t);
                     self.topics.insert(t.clone(), Some(id));
                     self.ids.insert(id, t.clone());
                     out.push((t, v));
                 }
                 Err(e) => {
                     log::warn!("rtd: ConnectData {} {:?}: {e}", t.prog_id, t.strings);
-                    if is_gone(&e) {
-                        self.forget(&t.prog_id);
-                    }
-                    self.retry_at.insert(t.prog_id.clone(), now + RETRY);
+                    self.connect_failed(&t, &e, now);
                 }
             }
         }
         out
     }
 
-    /// RefreshData on the servers that called UpdateNotify. A failing server is forgotten.
+    /// A topic that failed waits on its own; a server that went away holds back all its topics.
+    fn connect_failed(&mut self, t: &Topic, e: &windows_core::Error, now: Instant) {
+        if is_gone(e) {
+            self.lose(&t.prog_id, now);
+        } else {
+            self.topic_retry.insert(t.clone(), now + RETRY);
+        }
+    }
+
+    /// RefreshData on the servers that called UpdateNotify.
     fn refresh(&mut self) -> Vec<(Topic, RtdValue)> {
         let mut out = Vec::new();
-        let mut gone = Vec::new();
+        let mut failed = Vec::new();
         for (prog_id, s) in &self.servers {
             if !s.pending.swap(false, Ordering::AcqRel) {
                 continue;
             }
             match refresh_data(&s.rtd) {
                 Ok(pairs) => out.extend(pairs.into_iter().filter_map(|(id, v)| Some((self.ids.get(&id)?.clone(), v)))),
-                Err(e) => {
-                    log::warn!("rtd: RefreshData {prog_id}: {e}");
-                    gone.push(prog_id.clone());
-                }
+                Err(e) => failed.push((prog_id.clone(), e)),
             }
         }
         let now = Instant::now();
-        for p in gone {
-            self.forget(&p);
-            self.retry_at.insert(p, now + RETRY);
+        for (p, e) in failed {
+            self.refresh_failed(&p, &e, now);
         }
         out
+    }
+
+    /// Only a server that went away is dropped; any other error is logged and the server kept.
+    fn refresh_failed(&mut self, prog_id: &str, e: &windows_core::Error, now: Instant) {
+        log::warn!("rtd: RefreshData {prog_id}: {e}");
+        if is_gone(e) {
+            self.lose(prog_id, now);
+        }
+    }
+
+    /// A server process that died sends nothing: ask each server `Heartbeat` every `ALIVE_CHECK`,
+    /// and drop the ones that went away or said `Disconnect`.
+    fn check_alive(&mut self, now: Instant) {
+        let mut gone = Vec::new();
+        for (prog_id, s) in &mut self.servers {
+            if s.gone.load(Ordering::Acquire) {
+                gone.push(prog_id.clone());
+                continue;
+            }
+            if now < s.beat_at {
+                continue;
+            }
+            s.beat_at = now + ALIVE_CHECK;
+            let mut alive = 0;
+            // SAFETY: a started server and an out-pointer valid for the call.
+            if let Err(e) = unsafe { s.rtd.Heartbeat(&mut alive) }.ok()
+                && is_gone(&e)
+            {
+                gone.push(prog_id.clone());
+            }
+        }
+        for p in gone {
+            log::warn!("rtd: {p} went away");
+            self.lose(&p, now);
+        }
+    }
+
+    /// The server went away: forget it and wait before starting it again.
+    fn lose(&mut self, prog_id: &str, now: Instant) {
+        self.forget(prog_id);
+        self.lost.insert(prog_id.to_string());
+        self.retry_at.insert(prog_id.to_string(), now + RETRY);
     }
 
     /// The server went away: drop it; its topics wait to be connected again (cells keep their
@@ -506,6 +643,7 @@ fn run(rx: &Receiver<Msg>, out: &Mutex<Vec<(Topic, RtdValue)>>, waker: &dyn Fn()
                 Err(TryRecvError::Empty) => break,
             }
         }
+        st.check_alive(Instant::now());
         let mut fresh = st.connect_pending();
         fresh.extend(st.refresh());
         if !fresh.is_empty() {
@@ -565,5 +703,87 @@ mod tests {
             SafeArrayDestroy(psa).unwrap();
             assert_eq!(pairs, vec![(7, RtdValue::Number(56.0)), (8, RtdValue::Text("PETR4".into())), (9, RtdValue::Number(-1.0))]);
         }
+    }
+
+    fn t(prog_id: &str, s: &str) -> Topic {
+        Topic { prog_id: prog_id.into(), server: String::new(), strings: vec![s.into()] }
+    }
+
+    fn sorted(mut v: Vec<Topic>) -> Vec<Topic> {
+        v.sort_by(|a, b| (&a.prog_id, &a.strings).cmp(&(&b.prog_id, &b.strings)));
+        v
+    }
+
+    const GONE: HRESULT = HRESULT(0x8001_0108_u32 as i32); // RPC_E_DISCONNECTED
+
+    #[test]
+    fn a_failing_topic_does_not_hold_back_the_others() {
+        let mut st = State::default();
+        for s in ["X", "Y", "Z"] {
+            st.want(t("p", s));
+        }
+        let now = Instant::now();
+        st.connect_failed(&t("p", "X"), &E_FAIL.into(), now);
+        assert_eq!(sorted(st.due(now)), vec![t("p", "Y"), t("p", "Z")]);
+        assert_eq!(sorted(st.due(now + RETRY)), vec![t("p", "X"), t("p", "Y"), t("p", "Z")]);
+    }
+
+    #[test]
+    fn a_server_that_went_away_holds_back_only_its_own_topics() {
+        let mut st = State::default();
+        st.want(t("p", "X"));
+        st.want(t("p", "Y"));
+        st.want(t("q", "W"));
+        let now = Instant::now();
+        st.connect_failed(&t("p", "X"), &GONE.into(), now);
+        assert_eq!(st.due(now), vec![t("q", "W")]);
+        assert!(st.lost.contains("p"));
+    }
+
+    #[test]
+    fn a_passing_refresh_error_keeps_the_server_and_a_lost_one_reconnects_its_topics() {
+        let mut st = State::default();
+        st.topics.insert(t("p", "X"), Some(1));
+        st.ids.insert(1, t("p", "X"));
+        let now = Instant::now();
+        st.refresh_failed("p", &E_FAIL.into(), now);
+        assert_eq!(st.topics.get(&t("p", "X")), Some(&Some(1)), "a passing error keeps the topic connected");
+        st.refresh_failed("p", &GONE.into(), now);
+        assert_eq!(st.topics.get(&t("p", "X")), Some(&None), "the server went away: connect again later");
+        assert!(st.ids.is_empty() && st.lost.contains("p"));
+    }
+
+    #[test]
+    fn disconnect_from_the_server_marks_it_gone() {
+        let (pending, gone) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let callback: IRTDUpdateEvent = Callback { pending: pending.clone(), gone: gone.clone() }.into();
+        unsafe {
+            assert!(callback.UpdateNotify().is_ok());
+            assert!(callback.Disconnect().is_ok());
+        }
+        assert!(pending.load(Ordering::Acquire) && gone.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn process_running_finds_this_test_and_not_a_made_up_name() {
+        let me = std::env::current_exe().unwrap();
+        assert!(process_running(&me.file_name().unwrap().to_string_lossy()));
+        assert!(!process_running("gridcraft-nao-existe.exe"));
+    }
+
+    #[test]
+    fn the_exe_comes_out_of_a_server_command_line() {
+        assert_eq!(exe_name(r"C:\Users\x\AppData\Roaming\Nelogica\Profit_2026\profitchart.exe"), Some("profitchart.exe".into()));
+        assert_eq!(exe_name(r#""C:\Program Files\Some App\Server.EXE" /automation"#), Some("server.exe".into()));
+        assert_eq!(exe_name(r"C:\Program Files\Some App\server.exe -Embedding"), Some("server.exe".into()));
+        assert_eq!(exe_name("mscoree.dll"), None);
+    }
+
+    #[test]
+    #[ignore = "needs Profit and Fast Trade installed"]
+    fn profit_is_an_exe_server_and_fast_trade_a_dll() {
+        assert_eq!(local_server_exe("rtdtrading.rtdserver"), Some("profitchart.exe".into()));
+        assert_eq!(local_server_exe("srv.rtd"), None);
+        assert!(may_restart("srv.rtd"));
     }
 }

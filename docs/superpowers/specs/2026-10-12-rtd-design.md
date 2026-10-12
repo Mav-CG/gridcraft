@@ -93,7 +93,8 @@ Essa lista vai também para `RTD-FORK.md` (raiz), o roteiro do merge mensal.
   avaliar para erro, a célula devolve esse erro.
 - Chave do tópico = `(progID minúsculo, servidor, [t1..tn])`. Fórmulas iguais compartilham o tópico.
 - Tópico conhecido ⇒ o último valor. Novo ⇒ registra o pedido e devolve `#N/A` até o valor chegar.
-- Toda consulta marca o tópico como **visto na passada atual** (usado na varredura, §4.3).
+- Toda consulta marca o tópico como **visto desde a última varredura** (usado na varredura, §4.3;
+  vale também leitura fora da passada, ex. formatação condicional avaliada na pintura).
 
 ### 4.2 Thread COM (`crates/rtd-com`)
 
@@ -107,10 +108,17 @@ Essa lista vai também para `RTD-FORK.md` (raiz), o roteiro do merge mensal.
   (`waker` = `egui::Context::request_repaint`). `RefreshData` com 0 tópicos ⇒ nada muda, nada acorda.
 - Conversão de VARIANT: `VT_R8`/`VT_R4`/`VT_I*`/`VT_UI*`/`VT_CY`/`VT_DATE`⇒número; `VT_BOOL`⇒lógico;
   `VT_BSTR`⇒texto; `VT_EMPTY` ou `""`⇒vazio; `VT_ERROR` ou desconhecido⇒`#N/A`.
-- **Falhas:** erro em `CoCreateInstance`/`ServerStart`/`ConnectData` (inclui o Profit ainda
-  carregando) ⇒ o tópico fica `#N/A` e é tentado de novo a cada **5 s**. Servidor que cai
-  (chamada falha com `RPC_E_DISCONNECTED`/`RPC_S_SERVER_UNAVAILABLE`) ⇒ descarta o servidor, as
-  células mantêm o último valor, reconecta a cada 5 s e religa todos os tópicos vivos.
+- **Falhas:** erro ao iniciar o servidor (`CoCreateInstance`/`ServerStart`) ⇒ todos os tópicos
+  daquele progID esperam **5 s**; erro de `ConnectData` num tópico (ticker errado, Profit ainda
+  carregando) ⇒ só **aquele tópico** espera 5 s. Erro de `RefreshData` que não seja queda ⇒ só log,
+  o servidor fica.
+- **Queda do servidor** (revisão de 12/10): detectada por erro RPC (`RPC_E_DISCONNECTED`,
+  `RPC_S_SERVER_UNAVAILABLE`, `RPC_E_SERVER_DIED*`, `CO_E_OBJNOTCONNECTED`) em qualquer chamada,
+  pelo `Heartbeat` pedido a cada **5 s** a cada servidor, ou pelo `Disconnect` do callback ⇒ descarta
+  o servidor; as células mantêm o último valor. A reconexão (a cada 5 s, religando os tópicos vivos)
+  de um servidor EXE (`LocalServer32`, o Profit) só acontece quando o processo dele voltou a rodar —
+  o GridCraft não reabre o Profit que o usuário fechou. Servidor DLL (o Fast Trade) reconecta direto.
+  Na abertura da planilha continua como no Excel: o COM abre o Profit se ele não estiver aberto.
 - Na saída do app: `DisconnectData` dos tópicos vivos e `ServerTerminate` em cada servidor.
 
 ### 4.3 Atualização (`apps/gridcraft/src/rtd.rs` + `Session::rtd_refresh`)
@@ -122,14 +130,14 @@ Essa lista vai também para `RTD-FORK.md` (raiz), o roteiro do merge mensal.
   `calc.cells_changed(&mut wb, &[])` (só os nós dinâmicos e dependentes), troca o `wb`; se o
   documento **não** estava modificado antes, `saved = wb` (mesmo truque de `DocState::store_view`).
   Nada entra em `undo`/`redo`/`journal`.
-- **Varredura:** a atualização abre uma passada nova; ao fim, os tópicos não consultados ⇒
-  `DisconnectData` (fórmula apagada, argumento trocado, documento fechado). A varredura **não
+- **Varredura:** ao fim da atualização, os tópicos não consultados desde a varredura anterior ⇒
+  `DisconnectData` (fórmula apagada, argumento trocado, documento fechado — saem uma varredura
+  depois da última leitura). A varredura **não
   acontece** se algum documento estiver em modo manual (as células dele não reconsultam os tópicos).
 - Modo manual: o RTD não atualiza até F9 (`formulas.calculateNow`), como no Excel.
 
 ### 4.4 Fora da primeira versão
 
-- `IRtdServer::Heartbeat` (os dois servidores funcionaram sem ele; a reconexão de 5 s cobre a queda).
 - Opção de interface para o intervalo (200 ms fixo no código) ou para a lista de servidores.
 - Isolar a DLL do Fast Trade num processo auxiliar (é a opção 2, avaliada só se a DLL derrubar o app).
 - Persistir os valores RTD de última vez no arquivo (`volatileDependencies.xml`).
