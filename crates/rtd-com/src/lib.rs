@@ -6,6 +6,8 @@
 
 #[cfg(windows)]
 mod win;
+#[cfg(windows)]
+pub use win::RtdClient;
 
 /// The RTD servers `=RTD()` may start (spec §3.2); any other ProgID is `#N/A` without touching COM.
 pub const ALLOWED: &[&str] = &["srv.rtd", "rtdtrading.rtdserver"];
