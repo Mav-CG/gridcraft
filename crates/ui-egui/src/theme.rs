@@ -307,6 +307,11 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
         let dark = theme == egui::Theme::Dark;
         let t = if dark { Tokens::dark() } else { Tokens::light() };
         let mut v = if dark { Visuals::dark() } else { Visuals::light() };
+        // Fork Mav-CG: the sheet is black-on-white in both themes, and egui uses one font atlas
+        // for every text. Dark's TwoCoverageMinusCoverageSq fattens and blurs the cell text, and
+        // sub-pixel binning softens it further; both off draw the cells as sharp as possible.
+        v.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Off;
+        v.text_options.subpixel_binning = false;
         v.panel_fill = t.window;
         v.window_fill = t.menu_bg;
         v.extreme_bg_color = t.input_bg;

@@ -22,6 +22,7 @@ Windows). O upstream (`storytold/gridcraft`) recusa RTD por decisão. Design:
 | `apps/gridcraft/src/main.rs` | `mod rtd;` · `rtd::tick` em `logic` · `rtd::stop` em `on_exit` · `rtd::install` antes de `Session::new()` · `rtd::start` no criador do eframe |
 | `apps/gridcraft/Cargo.toml` | `gridcraft-rtd-com` no alvo Windows |
 | `xtask/src/layers.rs` | `("rtd-com", Class::Layer(0))` na `TABLE` |
+| `crates/ui-egui/src/theme.rs` | em `apply`, `text_options` com `color_transfer_function = Off` e `subpixel_binning = false` nos dois temas — célula preto-no-branco nítida também no tema escuro (03/11/2026; não é RTD, é nitidez do texto) |
 
 Premissas do upstream de que o RTD depende (se mudarem, adaptar):
 
