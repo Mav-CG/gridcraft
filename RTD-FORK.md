@@ -19,7 +19,7 @@ Windows). O upstream (`storytold/gridcraft`) recusa RTD por decisão. Design:
 | `crates/calc/src/eval/call.rs` | `"RTD" => self.rtd(args),` em `Evaluator::call`, antes do ramo `"NOW" \| "TODAY" …` (até 03/11/2026 ficava em `eval.rs`; o upstream partiu o arquivo em módulos) |
 | `crates/calc/src/lib.rs` | `pub mod rtd;` |
 | `crates/engine/src/lib.rs` | `mod rtd;` |
-| `apps/gridcraft/src/main.rs` | `mod rtd;` · `rtd::tick` em `logic` · `rtd::stop` em `on_exit` · `rtd::install` antes de `Session::new()` · `rtd::start` no criador do eframe |
+| `apps/gridcraft/src/main.rs` | `mod rtd;` · `rtd::tick` em `logic` · `rtd::stop` em `on_exit` · `rtd::install` antes de `Session::new()` · `rtd::start` no criador do eframe · `gridcraft_ui_egui::fonts::start_scan()` antes de `setup_context_for_language` (sem ele nenhuma fonte da planilha era carregada — Verdana/Segoe UI saíam Calibri; defeito do upstream, 03/11/2026) |
 | `apps/gridcraft/Cargo.toml` | `gridcraft-rtd-com` no alvo Windows |
 | `xtask/src/layers.rs` | `("rtd-com", Class::Layer(0))` na `TABLE` |
 | `crates/ui-egui/src/theme.rs` | em `apply`, `text_options` com `color_transfer_function = Off` e `subpixel_binning = false` nos dois temas — célula preto-no-branco nítida também no tema escuro (03/11/2026; não é RTD, é nitidez do texto) |

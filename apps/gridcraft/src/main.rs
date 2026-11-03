@@ -394,6 +394,10 @@ fn main() -> eframe::Result<()> {
                 let Some(mut app) = pending.take() else {
                     return Err("the app was already created".into());
                 };
+                // Fork Mav-CG: catalog the installed fonts, as `SheetApp::setup_context` does;
+                // without the scan no workbook font is ever bound and every cell draws in the
+                // built-in cell face (Verdana, Segoe UI… all looked like Calibri).
+                gridcraft_ui_egui::fonts::start_scan();
                 SheetApp::setup_context_for_language(&cc.egui_ctx, app.ui.dark, app.ui.language);
                 if let Some(port) = control_port {
                     match control_server::start(port, control_token.clone(), cc.egui_ctx.clone()) {
