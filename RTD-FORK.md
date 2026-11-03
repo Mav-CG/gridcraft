@@ -16,7 +16,7 @@ Windows). O upstream (`storytold/gridcraft`) recusa RTD por decisão. Design:
 
 | Arquivo | Encaixe |
 |---|---|
-| `crates/calc/src/eval.rs` | `"RTD" => self.rtd(args),` em `Evaluator::call`, antes do ramo `"NOW" \| "TODAY" …` |
+| `crates/calc/src/eval/call.rs` | `"RTD" => self.rtd(args),` em `Evaluator::call`, antes do ramo `"NOW" \| "TODAY" …` (até 03/11/2026 ficava em `eval.rs`; o upstream partiu o arquivo em módulos) |
 | `crates/calc/src/lib.rs` | `pub mod rtd;` |
 | `crates/engine/src/lib.rs` | `mod rtd;` |
 | `apps/gridcraft/src/main.rs` | `mod rtd;` · `rtd::tick` em `logic` · `rtd::stop` em `on_exit` · `rtd::install` antes de `Session::new()` · `rtd::start` no criador do eframe |
@@ -25,14 +25,14 @@ Windows). O upstream (`storytold/gridcraft`) recusa RTD por decisão. Design:
 
 Premissas do upstream de que o RTD depende (se mudarem, adaptar):
 
-- `precedents()` em `eval.rs` marca como `dynamic` a função que não está no registro nem em `is_special`.
+- `precedents()` em `eval/special.rs` marca como `dynamic` a função que não está no registro nem em `is_special`.
 - `Calc::cells_changed(wb, &[])` reavalia todos os nós `dynamic`.
 - `DocState { wb, saved, calc }` e `is_dirty()` = `!Arc::ptr_eq(&wb, &saved)`.
 
 ## Toolchain
 
 O upstream usa recursos do Rust estável mais novo (ex.: `std::f64::consts::EULER_GAMMA`) apesar de
-declarar `rust-version = "1.90"`. Nesta máquina a pasta tem `rustup override set 1.99.0` (o `stable`
+declarar `rust-version` mais antigo (1.95 em 03/11/2026). Nesta máquina a pasta tem `rustup override set 1.99.0` (o `stable`
 global ficou intocado). Ao subir de versão: `rustup toolchain install <versão> --profile minimal -c
 clippy -c rustfmt`, `rustup target add wasm32-unknown-unknown --toolchain <versão>` e `rustup override
 set <versão>` dentro de `E:\gridcraft`.
@@ -41,10 +41,9 @@ set <versão>` dentro de `E:\gridcraft`.
 
 O `cargo xtask ci` não fica 100% verde nesta máquina por causas que não são do RTD:
 
-- `gridcraft-engine`: `io::tests::csv_save_keeps_the_separator_it_was_opened_with` e
-  `tests::saving_an_opened_semicolon_csv_keeps_semicolons` (número de 12 dígitos sai `1.24412E+11`
-  no CSV) — falham igual no upstream puro.
-- `gridcraft-ui-egui`: `i18n::tests::translations_are_unique_and_preserve_unknown_text` (falta a
+- ~~`gridcraft-engine`: os 2 testes de CSV (`1.24412E+11`)~~ — consertados no upstream; no merge
+  de 03/11/2026 (upstream `92cdc2a9`, 0.16.0) o `engine` passou 809/809.
+- `gridcraft-ui-egui` (não reconferido em 03/11): `i18n::tests::translations_are_unique_and_preserve_unknown_text` (falta a
   tradução francesa de "Different First Page"); o fork não toca o `ui-egui`.
 - `parity --check`: acusa `docs/parity-checklist.md` "desatualizado" só por causa do
   `core.autocrlf=true` (CRLF); regenerado, o conteúdo é idêntico.
