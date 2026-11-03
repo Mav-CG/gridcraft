@@ -23,6 +23,7 @@ Windows). O upstream (`storytold/gridcraft`) recusa RTD por decisão. Design:
 | `apps/gridcraft/Cargo.toml` | `gridcraft-rtd-com` no alvo Windows |
 | `xtask/src/layers.rs` | `("rtd-com", Class::Layer(0))` na `TABLE` |
 | `crates/ui-egui/src/theme.rs` | em `apply`, `text_options` com `color_transfer_function = Off` e `subpixel_binning = false` nos dois temas — célula preto-no-branco nítida também no tema escuro (03/11/2026; não é RTD, é nitidez do texto) |
+| `crates/ui-egui/src/grid/quadrant.rs` | `use super::leading;` e os dois `let y = …` (com e sem quebra) chamam `leading::text_y` — texto da célula na altura do GDI/Excel; módulo `grid/leading.rs` é só do fork, `mod leading;` em `grid.rs` (03/11/2026) |
 
 Premissas do upstream de que o RTD depende (se mudarem, adaptar):
 

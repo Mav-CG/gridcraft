@@ -3,6 +3,7 @@ use super::cell_paint::{
     rotated_text_pos, shrink_font, wrapped_cell_text_y,
 };
 use super::geo::Geo;
+use super::leading;
 use super::tables::{filter_button_rect, paint_filter_button};
 use super::{
     CellRef, CfCache, CfLook, Color32, FontId, HAlign, MAX_COLS, Painter, Pos2, RangeRef, Rect, Sheet, Stroke, StrokeKind, Tokens, Underline, VAlign,
@@ -395,7 +396,11 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
             HAlign::Right => rect.right() - pad,
             _ => text_left + pad + indent,
         };
-        let y = wrapped_cell_text_y(st.align.v, *rect, galley.size().y, z);
+        // Fork Mav-CG: placed where GDI places it (grid/leading.rs).
+        let y = match (leading::win_metrics(p.ctx(), &font), leading::first_baseline(&galley)) {
+            (Some(win), Some(ascent)) => leading::text_y(st.align.v, *rect, galley.rows.len(), ascent, win, z),
+            _ => wrapped_cell_text_y(st.align.v, *rect, galley.size().y, z),
+        };
         let text_clip = wrapped_text_clip(p, *rect, &galley, y, st.align.v);
         p.with_clip_rect(text_clip).galley(pos2(x, y), galley, color);
         return;
@@ -491,7 +496,11 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         _ => text_left + pad + indent,
     };
     let gh = galley.size().y;
-    let y = cell_text_y(st.align.v, *rect, gh, z);
+    // Fork Mav-CG: placed where GDI places it (grid/leading.rs).
+    let y = match (leading::win_metrics(p.ctx(), &font), leading::first_baseline(&galley)) {
+        (Some(win), Some(ascent)) => leading::text_y(st.align.v, *rect, 1, ascent, win, z),
+        _ => cell_text_y(st.align.v, *rect, gh, z),
+    };
     let cp = p.with_clip_rect(clip.intersect(p.clip_rect()));
     if rotated {
         let angle = -(st.align.rotation as f32).to_radians();
