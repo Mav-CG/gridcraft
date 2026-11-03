@@ -19,11 +19,11 @@ Windows). O upstream (`storytold/gridcraft`) recusa RTD por decisão. Design:
 | `crates/calc/src/eval/call.rs` | `"RTD" => self.rtd(args),` em `Evaluator::call`, antes do ramo `"NOW" \| "TODAY" …` (até 03/11/2026 ficava em `eval.rs`; o upstream partiu o arquivo em módulos) |
 | `crates/calc/src/lib.rs` | `pub mod rtd;` |
 | `crates/engine/src/lib.rs` | `mod rtd;` |
-| `apps/gridcraft/src/main.rs` | `mod rtd;` · `rtd::tick` em `logic` · `rtd::stop` em `on_exit` · `rtd::install` antes de `Session::new()` · `rtd::start` no criador do eframe · `gridcraft_ui_egui::fonts::start_scan()` antes de `setup_context_for_language` (sem ele nenhuma fonte da planilha era carregada — Verdana/Segoe UI saíam Calibri; defeito do upstream, 03/11/2026) |
+| `apps/gridcraft/src/main.rs` | `mod rtd;` · `rtd::tick` em `logic` · `rtd::stop` em `on_exit` · `rtd::install` antes de `Session::new()` · `rtd::start` no criador do eframe · `SheetApp::setup_desktop_context` no lugar de `setup_context_for_language` (inicia a busca de fontes; sem ela nenhuma fonte da planilha era carregada — Verdana/Segoe UI saíam Calibri). Vem do PR #3302 (`fix/font-scan-at-startup`), que também mexe em `ui-egui/src/app.rs`, `fonts.rs` (`start_scan(ctx)` repinta ao terminar) e `theme/font_setup.rs` (fonte da planilha mantém o fallback de scripts); some no merge quando o PR entrar no upstream (03/11/2026) |
 | `apps/gridcraft/Cargo.toml` | `gridcraft-rtd-com` no alvo Windows |
 | `xtask/src/layers.rs` | `("rtd-com", Class::Layer(0))` na `TABLE` |
 | `crates/ui-egui/src/theme.rs` | em `apply`, `text_options` com `color_transfer_function = Off` e `subpixel_binning = false` nos dois temas — célula preto-no-branco nítida também no tema escuro (03/11/2026; não é RTD, é nitidez do texto) |
-| `crates/ui-egui/src/grid/quadrant.rs` | `use super::leading;` e os dois `let y = …` (com e sem quebra) chamam `leading::text_y` — texto da célula na altura do GDI/Excel; módulo `grid/leading.rs` é só do fork, `mod leading;` em `grid.rs` (03/11/2026) |
+| `crates/ui-egui/src/grid/quadrant.rs` | `use super::baseline;`, os dois `let y = …` (com e sem quebra) chamam `baseline::gdi_text_y` e `wrapped_text_clip` recebe o fim do texto da linha — texto da célula na altura do GDI/Excel; módulo `grid/baseline.rs`, `mod baseline;` em `grid.rs`, teste em `grid/tests.rs`. Vem do PR #3303 (`fix/cell-text-baseline`; substituiu o `grid/leading.rs` do fork); some no merge quando o PR entrar no upstream (03/11/2026) |
 
 Premissas do upstream de que o RTD depende (se mudarem, adaptar):
 
