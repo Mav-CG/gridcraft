@@ -31,6 +31,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("pdf", Class::Layer(0)),
     // Fork Mav-CG: COM client for =RTD() (docs/superpowers/specs/2026-10-12-rtd-design.md).
     ("rtd-com", Class::Layer(0)),
+    // The confined launcher for helper processes; the Python worker and the apps use it.
+    ("sandbox", Class::Layer(0)),
     ("formula", Class::Layer(1)),
     ("functions", Class::Layer(1)),
     // Equation layout (LaTeX to glyphs, rules and paths) and OMML, on top of RaTeX.
