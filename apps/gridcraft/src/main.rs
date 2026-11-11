@@ -335,7 +335,8 @@ fn main() -> eframe::Result<()> {
     }
     let mut app = SheetApp::new(session, services());
     app.watch_desktop_theme();
-    app.start_update_check();
+    // Fork Mav-CG: no update check at start. "Update and Restart" would overwrite this build with
+    // the official release, which has no =RTD(). Help ▸ Check for Updates… still works by hand.
     let control_port = control_port;
     load_prefs(&mut app);
     // Stamp the startup workbook's author from the persisted user name.
