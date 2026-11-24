@@ -204,7 +204,19 @@ struct Server {
     gone: Arc<AtomicBool>,
     /// When to ask `Heartbeat` next.
     beat_at: Instant,
+    /// An EXE server (Profit's `rtdtrading.rtdserver` lives in profitchart.exe) is ONE server
+    /// shared with every other client on the machine: `ServerTerminate` would take it down for
+    /// all of them (the dash-app book_reader froze that way). Only an in-process one is ours.
+    shared: bool,
     _callback: IRTDUpdateEvent,
+}
+
+/// Our topic ids start far above the other clients' (the dash-app book_reader counts from 1, up
+/// to ~20k): on a shared server, an id that collides could connect or DisconnectData THEIR topic.
+const FIRST_TOPIC_ID: i32 = 1_000_000_000;
+
+fn next_topic_id(current: i32) -> i32 {
+    if current < FIRST_TOPIC_ID { FIRST_TOPIC_ID } else { current.checked_add(1).unwrap_or(FIRST_TOPIC_ID) }
 }
 
 /// CoCreateInstance (in-process DLL or local EXE, which COM starts if it isn't running) + ServerStart.
@@ -221,7 +233,8 @@ fn start_server(prog_id: &str) -> windows_core::Result<Server> {
         if started <= 0 {
             return Err(windows_core::Error::new(E_FAIL, format!("ServerStart returned {started}")));
         }
-        Ok(Server { rtd, pending, gone, beat_at: Instant::now() + ALIVE_CHECK, _callback: callback })
+        let shared = local_server_exe(prog_id).is_some();
+        Ok(Server { rtd, pending, gone, beat_at: Instant::now() + ALIVE_CHECK, shared, _callback: callback })
     }
 }
 
@@ -453,7 +466,7 @@ impl State {
                 }
             };
             self.lost.remove(&t.prog_id);
-            self.next_id = self.next_id.checked_add(1).unwrap_or(1);
+            self.next_id = next_topic_id(self.next_id);
             let id = self.next_id;
             match connect_data(&rtd, id, &t.strings) {
                 Ok(v) => {
@@ -560,7 +573,8 @@ impl State {
                 let _ = unsafe { s.rtd.DisconnectData(id) };
             }
         }
-        for s in self.servers.values() {
+        // A shared (EXE) server only loses OUR topics, above; terminating it would cut everyone.
+        for s in self.servers.values().filter(|s| !s.shared) {
             // SAFETY: a started server.
             let _ = unsafe { s.rtd.ServerTerminate() };
         }
@@ -777,6 +791,13 @@ mod tests {
         assert_eq!(exe_name(r#""C:\Program Files\Some App\Server.EXE" /automation"#), Some("server.exe".into()));
         assert_eq!(exe_name(r"C:\Program Files\Some App\server.exe -Embedding"), Some("server.exe".into()));
         assert_eq!(exe_name("mscoree.dll"), None);
+    }
+
+    #[test]
+    fn topic_ids_start_far_from_other_clients_and_wrap_back_there() {
+        assert_eq!(next_topic_id(0), FIRST_TOPIC_ID);
+        assert_eq!(next_topic_id(FIRST_TOPIC_ID), FIRST_TOPIC_ID + 1);
+        assert_eq!(next_topic_id(i32::MAX), FIRST_TOPIC_ID);
     }
 
     #[test]
