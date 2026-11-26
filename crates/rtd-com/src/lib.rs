@@ -5,6 +5,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 #[cfg(windows)]
+mod ponte;
+#[cfg(windows)]
 mod win;
 #[cfg(windows)]
 pub use win::RtdClient;

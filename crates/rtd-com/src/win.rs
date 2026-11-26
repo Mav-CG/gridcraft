@@ -32,6 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows_core::{BSTR, GUID, HRESULT, Interface, PCWSTR, implement, interface};
 
+use crate::ponte::{Ponte, is_bridged};
 use crate::{RtdValue, Topic};
 
 /// A server or topic that failed is tried again after this.
@@ -648,9 +649,13 @@ fn run(rx: &Receiver<Msg>, out: &Mutex<Vec<(Topic, RtdValue)>>, waker: &dyn Fn()
         return;
     }
     let mut st = State::default();
+    // Profit's topics: through the book_reader, never a COM connection of ours (ponte.rs).
+    let mut ponte = Ponte::new();
     'run: loop {
         loop {
             match rx.try_recv() {
+                Ok(Msg::Connect(t)) if is_bridged(&t.prog_id) => ponte.want(t),
+                Ok(Msg::Disconnect(t)) if is_bridged(&t.prog_id) => ponte.unwant(&t),
                 Ok(Msg::Connect(t)) => st.want(t),
                 Ok(Msg::Disconnect(t)) => st.unwant(&t),
                 Ok(Msg::Stop) | Err(TryRecvError::Disconnected) => break 'run,
@@ -660,6 +665,7 @@ fn run(rx: &Receiver<Msg>, out: &Mutex<Vec<(Topic, RtdValue)>>, waker: &dyn Fn()
         st.check_alive(Instant::now());
         let mut fresh = st.connect_pending();
         fresh.extend(st.refresh());
+        fresh.extend(ponte.tick(Instant::now()));
         if !fresh.is_empty() {
             if let Ok(mut o) = out.lock() {
                 o.extend(fresh);
@@ -669,6 +675,7 @@ fn run(rx: &Receiver<Msg>, out: &Mutex<Vec<(Topic, RtdValue)>>, waker: &dyn Fn()
         pump(PUMP);
     }
     st.shutdown();
+    ponte.stop();
     drop(st);
     // SAFETY: matches the CoInitializeEx above; every COM object of this thread is released.
     unsafe { CoUninitialize() };
