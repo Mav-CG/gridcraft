@@ -6,6 +6,11 @@
 //! GridCraft no longer talks to Profit: it asks the book_reader for its topics through Redis and
 //! reads the values the book_reader publishes. The other side is
 //! `E:\dash-app\backend\tools\book_reader\ponte_rtd.py`, which documents the protocol.
+//!
+//! Without the book daemon (window closed, weekend) or without Redis, the topics fall back to a
+//! COM connection of our own (`Route::Direct`) — then GridCraft is Profit's only client. Once the
+//! daemon is back (`RTD_PONTE:VIVO`, set before its reader connects) they return to the bridge and
+//! our connection is dropped, so the reader keeps the notifications.
 // `Instant::now` is disallowed because it traps on wasm; this module only builds on Windows.
 #![allow(clippy::disallowed_methods)]
 
@@ -28,6 +33,18 @@ const ASK_TTL_S: u64 = 10;
 const READ_EVERY: Duration = Duration::from_millis(100);
 const RETRY: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Set by the book daemon while it runs a book_reader (`book_reader_autostart._sinal_da_ponte`).
+const ALIVE: &str = "RTD_PONTE:VIVO";
+
+/// Where the bridged topics go from now on.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Route {
+    /// No book daemon (closed, weekend) or no Redis: connect these topics to Profit ourselves.
+    Direct(Vec<Topic>),
+    /// The book daemon is back: drop our own connection, the book_reader serves the topics.
+    Bridge,
+}
 
 pub(crate) fn is_bridged(prog_id: &str) -> bool {
     BRIDGED.iter().any(|b| b.eq_ignore_ascii_case(prog_id))
@@ -61,6 +78,8 @@ pub(crate) struct Ponte {
     sent: HashMap<String, RtdValue>,
     /// The topic set changed: ask again now, not at `ask_at`.
     dirty: bool,
+    /// The topics are connected to Profit directly (no book daemon).
+    direct: bool,
     con: Option<redis::Connection>,
     retry_at: Option<Instant>,
     ask_at: Option<Instant>,
@@ -74,6 +93,7 @@ impl Ponte {
             topics: HashMap::new(),
             sent: HashMap::new(),
             dirty: false,
+            direct: false,
             con: None,
             retry_at: None,
             ask_at: None,
@@ -93,13 +113,34 @@ impl Ponte {
         self.dirty = true;
     }
 
-    /// Renews the request and reads the values; returns the ones that changed.
-    pub(crate) fn tick(&mut self, now: Instant) -> Vec<(Topic, RtdValue)> {
+    pub(crate) fn direct(&self) -> bool {
+        self.direct
+    }
+
+    /// Whether the topics change hands, given whether the book daemon is running.
+    fn route(&mut self, alive: bool) -> Option<Route> {
+        if alive == !self.direct {
+            return None;
+        }
+        self.direct = !alive;
+        if alive {
+            self.sent.clear(); // hand out the bridge's values again, whatever direct gave
+            log::info!("rtd: Profit through the book_reader");
+            Some(Route::Bridge)
+        } else {
+            log::info!("rtd: no book daemon, Profit connected directly");
+            Some(Route::Direct(self.topics.values().cloned().collect()))
+        }
+    }
+
+    /// Renews the request, checks the book daemon and reads the values: returns the values that
+    /// changed and, when the topics change hands, where they go now.
+    pub(crate) fn tick(&mut self, now: Instant) -> (Vec<(Topic, RtdValue)>, Option<Route>) {
         if self.topics.is_empty() && !self.dirty {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         if self.retry_at.is_some_and(|at| now < at) {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         match self.exchange(now) {
             Ok(out) => {
@@ -112,12 +153,13 @@ impl Ponte {
                 }
                 self.con = None;
                 self.retry_at = Some(now + RETRY);
-                Vec::new()
+                (Vec::new(), self.route(false))
             }
         }
     }
 
-    fn exchange(&mut self, now: Instant) -> redis::RedisResult<Vec<(Topic, RtdValue)>> {
+    #[allow(clippy::type_complexity)]
+    fn exchange(&mut self, now: Instant) -> redis::RedisResult<(Vec<(Topic, RtdValue)>, Option<Route>)> {
         if self.con.is_none() {
             let con = redis::Client::open(URL)?.get_connection_with_timeout(IO_TIMEOUT)?;
             con.set_read_timeout(Some(IO_TIMEOUT))?;
@@ -125,9 +167,10 @@ impl Ponte {
             self.con = Some(con);
             self.dirty = true;
         }
-        let Some(con) = self.con.as_mut() else { return Ok(Vec::new()) };
+        let Some(con) = self.con.as_mut() else { return Ok((Vec::new(), None)) };
+        let mut route = None;
         if self.dirty || self.ask_at.is_none_or(|at| now >= at) {
-            redis::pipe()
+            let (alive,): (bool,) = redis::pipe()
                 .cmd("SADD")
                 .arg(CLIENTS)
                 .arg(&self.client)
@@ -138,13 +181,17 @@ impl Ponte {
                 .arg("EX")
                 .arg(ASK_TTL_S)
                 .ignore()
-                .exec(con)?;
+                .cmd("EXISTS")
+                .arg(ALIVE)
+                .query(con)?;
             self.dirty = false;
             self.ask_at = Some(now + ASK_EVERY);
+            route = self.route(alive);
         }
-        if self.topics.is_empty() || self.read_at.is_some_and(|at| now < at) {
-            return Ok(Vec::new());
+        if self.direct || self.topics.is_empty() || self.read_at.is_some_and(|at| now < at) {
+            return Ok((Vec::new(), route));
         }
+        let Some(con) = self.con.as_mut() else { return Ok((Vec::new(), route)) };
         self.read_at = Some(now + READ_EVERY);
         let keys: Vec<&String> = self.topics.keys().collect();
         let values: Vec<Option<String>> = redis::cmd("HMGET").arg(VALUES).arg(&keys).query(con)?;
@@ -159,7 +206,7 @@ impl Ponte {
                 out.push((t.clone(), v));
             }
         }
-        Ok(out)
+        Ok((out, route))
     }
 
     /// Withdraws the request so the book_reader drops our topics now, not when it expires.
@@ -210,6 +257,19 @@ mod tests {
         let keys = [key(&t(&["WINZ26", "ULT"])), key(&t(&["PETR4", "ULT"]))];
         assert_eq!(request(keys.iter()), "PETR4\u{1f}ULT\u{1e}WINZ26\u{1f}ULT");
         assert_eq!(request(std::iter::empty()), "");
+    }
+
+    #[test]
+    fn topics_go_direct_without_the_book_daemon_and_back_when_it_returns() {
+        let mut p = Ponte::new();
+        p.want(t(&["WINZ26_F_0", "ULT"]));
+        assert_eq!(p.route(true), None, "daemon running from the start: nothing changes hands");
+        assert_eq!(p.route(false), Some(Route::Direct(vec![t(&["WINZ26_F_0", "ULT"])])));
+        assert!(p.direct());
+        assert_eq!(p.route(false), None, "already direct");
+        p.sent.insert(key(&t(&["WINZ26_F_0", "ULT"])), RtdValue::Number(1.0));
+        assert_eq!(p.route(true), Some(Route::Bridge));
+        assert!(!p.direct() && p.sent.is_empty(), "the bridge's values go out again");
     }
 
     #[test]

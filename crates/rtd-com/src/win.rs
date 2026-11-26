@@ -32,7 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows_core::{BSTR, GUID, HRESULT, Interface, PCWSTR, implement, interface};
 
-use crate::ponte::{Ponte, is_bridged};
+use crate::ponte::{Ponte, Route, is_bridged};
 use crate::{RtdValue, Topic};
 
 /// A server or topic that failed is tried again after this.
@@ -567,6 +567,18 @@ impl State {
         }
     }
 
+    /// The book daemon is back: our topics of the bridged servers go through it again. Their COM
+    /// connection is dropped WITHOUT `ServerTerminate` (Profit's server is shared with the reader).
+    fn hand_over_bridged(&mut self) {
+        let bridged: Vec<Topic> = self.topics.keys().filter(|t| is_bridged(&t.prog_id)).cloned().collect();
+        for t in &bridged {
+            self.unwant(t);
+        }
+        self.servers.retain(|p, _| !is_bridged(p));
+        self.retry_at.retain(|p, _| !is_bridged(p));
+        self.lost.retain(|p| !is_bridged(p));
+    }
+
     fn shutdown(&mut self) {
         for (t, id) in self.topics.drain() {
             if let (Some(id), Some(s)) = (id, self.servers.get(&t.prog_id)) {
@@ -654,8 +666,16 @@ fn run(rx: &Receiver<Msg>, out: &Mutex<Vec<(Topic, RtdValue)>>, waker: &dyn Fn()
     'run: loop {
         loop {
             match rx.try_recv() {
-                Ok(Msg::Connect(t)) if is_bridged(&t.prog_id) => ponte.want(t),
-                Ok(Msg::Disconnect(t)) if is_bridged(&t.prog_id) => ponte.unwant(&t),
+                Ok(Msg::Connect(t)) if is_bridged(&t.prog_id) => {
+                    if ponte.direct() {
+                        st.want(t.clone());
+                    }
+                    ponte.want(t);
+                }
+                Ok(Msg::Disconnect(t)) if is_bridged(&t.prog_id) => {
+                    ponte.unwant(&t);
+                    st.unwant(&t);
+                }
                 Ok(Msg::Connect(t)) => st.want(t),
                 Ok(Msg::Disconnect(t)) => st.unwant(&t),
                 Ok(Msg::Stop) | Err(TryRecvError::Disconnected) => break 'run,
@@ -665,7 +685,13 @@ fn run(rx: &Receiver<Msg>, out: &Mutex<Vec<(Topic, RtdValue)>>, waker: &dyn Fn()
         st.check_alive(Instant::now());
         let mut fresh = st.connect_pending();
         fresh.extend(st.refresh());
-        fresh.extend(ponte.tick(Instant::now()));
+        let (bridged, route) = ponte.tick(Instant::now());
+        fresh.extend(bridged);
+        match route {
+            Some(Route::Direct(topics)) => topics.into_iter().for_each(|t| st.want(t)),
+            Some(Route::Bridge) => st.hand_over_bridged(),
+            None => {}
+        }
         if !fresh.is_empty() {
             if let Ok(mut o) = out.lock() {
                 o.extend(fresh);
